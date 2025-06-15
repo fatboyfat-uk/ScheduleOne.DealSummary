@@ -26,6 +26,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using UnityEngine;
 using UnityEngine.Events;
 
@@ -35,29 +36,6 @@ namespace ScheduleOne.DealSummary.Mono
     {
         private static MelonLogger.Instance Logger => new MelonLogger.Instance(nameof(DealSummaryQuest));
 
-        private static List<DealProduct> EnumerateCurrentDealProducts()
-        {
-            Dictionary<string, int> productCounts = new Dictionary<string, int>();
-
-            var contracts = Contract.Contracts ?? new List<Contract>();
-
-            foreach (var contract in contracts)
-            {
-                if (contract.Dealer != null)
-                    continue; // Only consider contracts where the player is the dealer
-
-                foreach (var product in contract.ProductList.entries)
-                {
-                    productCounts.TryAdd(product.ProductID, 0);
-                    productCounts[product.ProductID] += product.Quantity;
-                }
-            }
-
-            return productCounts
-                .Select(kvp => new DealProduct(Registry.GetItem(kvp.Key).Name, kvp.Value))
-                .ToList();
-        }
-
         public override bool ShouldSave() => false;
         protected override bool ShouldShowJournalEntry() => false;
 
@@ -66,17 +44,8 @@ namespace ScheduleOne.DealSummary.Mono
 
         }
 
-        public void Initialize()
+        public override void InitializeQuest(string title, string description, QuestEntryData[] entries, string guid)
         {
-            GUID = Guid.NewGuid();
-            GUIDManager.RegisterObject(this);
-
-            title = "Scheduled deal totals:";
-            gameObject.name = title;
-
-            Description = "This quest is used to display the product totals in the UI.";
-            QuestState = EQuestState.Inactive;
-
             var iconGameObject = new GameObject(name: "QuestIcon");
             iconGameObject.transform.SetParent(transform, false);
             IconPrefab = iconGameObject.AddComponent<RectTransform>();
@@ -88,53 +57,97 @@ namespace ScheduleOne.DealSummary.Mono
             onComplete = new UnityEvent();
             onInitialComplete = new UnityEvent();
 
-            IsTracked = true;
-
-            NetworkSingleton<TimeManager>.Instance.onTick += UpdateProducts;
-            SetupHudUI();
-            gameObject.SetActive(true);
+            base.InitializeQuest(title, description, entries, guid);
+            gameObject.name = "Deal Summary Quest";
         }
 
-        public void UpdateProducts()
+        public void Initialize(List<DealProduct> products)
         {
-            var products = EnumerateCurrentDealProducts();
-            var processedEntries = new List<QuestEntry>(Entries.Count);
-
-            for (int i = 0; i < products.Count; i++)
-            {
-                var newTitle = $"{products[i].Quantity}x {products[i].ProductName}";
-                var entry = Entries.FirstOrDefault(e => e.Title.Contains(products[i].ProductName));
-                if (entry == null)
-                {
-                    Logger.Msg($"Creating quest entry: {newTitle}");
-                    var newEntry = CreateQuestEntry(newTitle);
-                    Entries.Add(newEntry);
-                    processedEntries.Add(newEntry);
-                }
-                else if (entry.Title != newTitle || entry.State == EQuestState.Inactive)
-                {
-                    Logger.Msg($"Updating {entry.State} quest entry: {entry.Title} to {newTitle}");
-                    UpdateQuestEntry(entry, newTitle);
-                    processedEntries.Add(entry);
-                }
-                else
-                {
-                    Logger.Msg($"Quest entry unchanged: {entry.Title}");
-                    processedEntries.Add(entry);
-                }
-            }
+            InitializeQuest("Scheduled deals:", "A summary of the deal products.", Array.Empty<QuestEntryData>(), Guid.NewGuid().ToString());
 
             foreach (var entry in Entries)
+                entry.SetState(EQuestState.Cancelled);
+
+            Entries.Clear();
+
+            foreach (var product in products)
             {
-                if (!processedEntries.Contains(entry) && entry.State != EQuestState.Inactive)
-                {
-                    Logger.Msg($"Setting quest entry inactive: {entry.Title}");
-                    entry.SetState(EQuestState.Inactive);
-                }
+                var questEntry = CreateQuestEntry(product);
+                Entries.Add(questEntry);
             }
 
-            SetQuestState(ActiveEntryCount > 0 ? EQuestState.Active : EQuestState.Inactive);
-            UpdateHUDUI();
+            SetIsTracked(true);
+            SetupHudUI();
+
+            hudUI.transform.SetAsFirstSibling();
+        }
+
+        public bool TryUpdateProducts(List<DealProduct> products, bool force = false)
+        {
+            var productsToAdd = products.Count(p => !Entries.Any(e => e.gameObject.GetComponent<DealProduct>().ProductID == p.ProductID));
+            var entriesToRemove = Entries.Count(e => !products.Any(p => p.ProductID == e.gameObject.GetComponent<DealProduct>().ProductID));
+
+            if (force)
+            {
+                Logger.Msg("Disabling Hud UI layout");
+                hudUI.hudUILayout.enabled = false;
+                foreach (var entry in Entries)
+                {
+                    Logger.Msg($"Forcing quest entry state to Cancelled: {entry.Title}");
+                    typeof(QuestEntry).GetField("state", BindingFlags.NonPublic | BindingFlags.Instance).SetValue(entry, EQuestState.Cancelled);
+
+                    var entryUI = typeof(QuestEntry).GetField("entryUI", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(entry) as QuestEntryHUDUI;
+                    if (entryUI != null)
+                    {
+                        Logger.Msg($"Setting quest entry HUD UI to inactive for {entry.Title}");
+                        entryUI.gameObject.SetActive(false);
+                    }
+                }
+                Entries.Clear();
+            }
+
+            if (!force && (productsToAdd > 0 || entriesToRemove > 0))
+            {
+                return false;
+            }
+            else
+            {
+                foreach (var product in products)
+                {
+                    var entry = Entries.SingleOrDefault(e => e.gameObject.GetComponent<DealProduct>().ProductID == product.ProductID);
+                    if (entry == null && force)
+                    {
+                        Logger.Msg($"Adding new quest entry for product: {product.ProductName}");
+                        entry = CreateQuestEntry(product);
+                        Entries.Add(entry);
+                    }
+                    else if (entry == null)
+                    {
+                        Logger.Error($"No existing quest entry found for product: {product.ProductName}");
+                    }
+                    else if (entry.Title != product.QuestTitle)
+                    {
+                        Logger.Msg($"Updating quest entry title from '{entry.Title}' to '{product.QuestTitle}'");
+                        UpdateQuestEntry(entry, product.QuestTitle);
+                    }
+                }
+
+                if (QuestState != EQuestState.Active)
+                {
+                    Logger.Msg($"Forcing quest state to Active");
+                    SetQuestState(EQuestState.Active);
+                }
+
+                if (force)
+                {
+                    Logger.Msg("Re-enabling Hud UI layout");
+                    hudUI.hudUILayout.enabled = true;
+                }
+
+                UpdateHUDUI();
+
+                return true;
+            }
         }
 
         private void UpdateQuestEntry(QuestEntry questEntry, string newTitle)
@@ -149,40 +162,35 @@ namespace ScheduleOne.DealSummary.Mono
         
             static IEnumerator Routine(QuestEntry questEntry, QuestEntryHUDUI entryHudUI, string newTitle)
             {
+                Logger.Msg("Playing exit animation for quest entry: " + questEntry.Title);
                 entryHudUI.Animation.Play("Quest entry exit");
                 yield return new WaitForEndOfFrame();
                 while (entryHudUI.Animation.isPlaying)
                 {
                     yield return new WaitForEndOfFrame();
                 }
+                Logger.Msg("Setting quest entry title: " + questEntry.Title);
                 questEntry.SetEntryTitle(newTitle);
+                Logger.Msg("Playing enter animation for quest entry: " + questEntry.Title);
                 entryHudUI.Animation.Play("Quest entry enter");
             }
         }
 
-        private QuestEntry CreateQuestEntry(string title)
+        private QuestEntry CreateQuestEntry(DealProduct product)
         {
-            var questEntryData = new QuestEntryData(title, EQuestState.Active);
+            var questEntryData = new QuestEntryData(product.QuestTitle, EQuestState.Active);
 
             GameObject gameObject = new GameObject(questEntryData.Name);
             gameObject.transform.SetParent(transform);
+
             QuestEntry questEntry = gameObject.AddComponent<QuestEntry>();
             questEntry.SetData(questEntryData);
             questEntry.CompleteParentQuest = false;
 
+            var dealProduct = gameObject.AddComponent<DealProduct>();
+            dealProduct.CopyFrom(product);
+
             return questEntry;
-        }
-
-        private class DealProduct
-        {
-            internal DealProduct(string productName, int quantity)
-            {
-                ProductName = productName;
-                Quantity = quantity;
-            }
-
-            public string ProductName { get; private set; }
-            public int Quantity { get; private set; }
         }
     }
 }

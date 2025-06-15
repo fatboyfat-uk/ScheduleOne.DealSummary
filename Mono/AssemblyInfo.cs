@@ -19,5 +19,5 @@
 using MelonLoader;
 using ScheduleOne.DealSummary.Mono;
 
-[assembly: MelonInfo(typeof(Core), "ScheduleOne.DealSummary.Mono", "1.0.0", "fatboyfat_uk", null)]
+[assembly: MelonInfo(typeof(Core), "ScheduleOne.DealSummary.Mono", "1.1.0", "fatboyfat_uk", null)]
 [assembly: MelonGame("TVGS", "Schedule I")]

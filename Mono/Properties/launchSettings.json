@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Debug Player": {
+      "commandName": "Executable",
+      "executablePath": "$(SolutionDir)\\DebugPlayer\\Schedule I.exe",
+      "commandLineArgs": "--melonloader.debug",
+      "workingDirectory": "$(SolutionDir)\\DebugPlayer"
+    }
+  }
+}
